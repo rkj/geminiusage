@@ -6,19 +6,45 @@ from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-# Default Pricing Configuration
-FLASH_MODELS = {"gemini-3-flash-preview", "gemini-2.5-flash", "flash", "fiercefalcon"}
+# Default patterns
+FLASH_PATTERNS = ["flash"]
+PRO_PATTERNS = ["pro"]
+
+def load_config():
+    """Loads custom model mappings from config files."""
+    config = {
+        "flash_patterns": list(FLASH_PATTERNS),
+        "pro_patterns": list(PRO_PATTERNS)
+    }
+    # Check ~/.gemini/pricing.json
+    p = Path.home() / ".gemini" / "pricing.json"
+    if p.exists():
+        try:
+            with p.open('r') as f:
+                data = json.load(f)
+                config["flash_patterns"].extend(data.get("flash_patterns", []))
+                config["pro_patterns"].extend(data.get("pro_patterns", []))
+        except Exception:
+            pass
+    return config
+
+CONFIG = load_config()
 
 def calculate_cost(model, input_tokens, cached_tokens, output_tokens):
     """Calculates cost based on model type and tiered pricing."""
-    if any(m in model.lower() for m in ["flash", "fiercefalcon"]):
+    model_lower = model.lower()
+    
+    # Determine category
+    is_flash = any(p in model_lower for p in CONFIG["flash_patterns"])
+    is_pro = any(p in model_lower for p in CONFIG["pro_patterns"])
+    
+    if is_flash and not is_pro:
         # Flash: $0.50 Input / $3.00 Output per 1M
         i_rate = 0.50
         c_rate = 0.25  # 50% discount for cache
         o_rate = 3.00
     else:
-        # Pro: Tiered pricing based on 200k context threshold
-        # Threshold is typically per-request.
+        # Default to Pro: Tiered pricing based on 200k context threshold
         context_size = input_tokens + cached_tokens
         if context_size < 200_000:
             i_rate = 2.00
