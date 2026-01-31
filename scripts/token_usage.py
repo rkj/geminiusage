@@ -128,18 +128,28 @@ def aggregate_usage():
 
 
 def print_report(stats, show_models=False, today_only=False):
-    if not stats:
-        print("No usage data found.")
-        return
-
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     if today_only:
         if today_str not in stats:
-            print(f"No usage data found for today ({today_str}).")
-            return
-        # Create a filtered version of stats containing only today
-        stats = {today_str: stats[today_str]}
+            # Initialize empty stats for today to ensure we print 0s instead of nothing
+            stats = {
+                today_str: {
+                    "unknown": {
+                        "sessions": set(),
+                        "input": 0,
+                        "cached": 0,
+                        "output": 0,
+                        "cost": 0.0,
+                    }
+                }
+            }
+        else:
+            stats = {today_str: stats[today_str]}
+
+    if not stats:
+        print("No usage data found.")
+        return
 
     # Header
     model_header = f"{'MODEL':<25} " if show_models else ""
