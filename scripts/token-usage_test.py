@@ -59,10 +59,39 @@ class TestTokenUsage(unittest.TestCase):
             cache_file = tmp_path / "usage_cache.json"
             self.assertTrue(cache_file.exists())
 
-            # Second run: should use cache (we can verify by checking mtime check in logs/debugger 
-            # or just ensuring output is identical)
+            # Second run: should use cache
             stats_cached = token_usage.aggregate_usage(base_dir=tmp_path)
             self.assertEqual(stats_cached["2026-01-20"]["gemini-3-flash"].input_tokens, 100)
+
+    def test_aggregation_robustness(self) -> None:
+        """Verifies that aggregation handles malformed or null-valued JSON fields."""
+        with TemporaryDirectory() as tmpdirname:
+            tmp_path = Path(tmpdirname)
+            chat_dir = tmp_path / "chats"
+            chat_dir.mkdir()
+
+            # Session with null tokens and null messages
+            session_nulls = {
+                "sessionId": "null-session",
+                "startTime": "2026-01-21T12:00:00Z",
+                "messages": [
+                    {
+                        "type": "gemini",
+                        "model": "gemini-3-flash",
+                        "tokens": None
+                    },
+                    None # Malformed message
+                ]
+            }
+            
+            with (chat_dir / "session-nulls.json").open("w") as f:
+                json.dump(session_nulls, f)
+            
+            # This should not crash
+            stats = token_usage.aggregate_usage(base_dir=tmp_path)
+            self.assertIn("2026-01-21", stats)
+            model_stats = stats["2026-01-21"]["gemini-3-flash"]
+            self.assertEqual(model_stats.input_tokens, 0)
 
     def test_calculate_cost_tiers(self) -> None:
         """Tests tiered cost calculation for Pro models."""
