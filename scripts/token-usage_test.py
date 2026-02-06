@@ -5,6 +5,7 @@ import tempfile
 import sys
 import os
 import io
+import re
 
 # Add the scripts directory to path to import token-usage
 sys.path.append(os.path.dirname(__file__))
@@ -237,8 +238,6 @@ class TestReporting(unittest.TestCase):
         output = captured_output.getvalue()
         
         self.assertIn("SUMMARY BY MODEL", output)
-        # The name might be truncated if it is too long, but we should at least see a good part of it.
-        # After my fix to increase width to 40, it should be fully there.
         self.assertIn("gemini-3-flash-long-model-name-testing", output)
         self.assertIn("TOTAL TOKENS", output)
         self.assertIn("TOTAL COST", output)
@@ -268,6 +267,60 @@ class TestReporting(unittest.TestCase):
         self.assertIn("AVG TOKENS/D", output)
         self.assertIn("TOTAL COST", output)
         self.assertIn("AVG COST/D", output)
+
+    def test_summary_statistics_usage_days(self):
+        from datetime import date, timedelta
+        import re
+        today = date.today()
+        # Create stats for 2 days out of 10
+        stats = {
+            (today - timedelta(days=1)).strftime("%Y-%m-%d"): {
+                "m1": {"sessions": {"s1"}, "input": 100, "cached": 0, "output": 0, "cost": 1.0}
+            },
+            (today - timedelta(days=5)).strftime("%Y-%m-%d"): {
+                "m1": {"sessions": {"s2"}, "input": 100, "cached": 0, "output": 0, "cost": 1.0}
+            }
+        }
+        
+        captured_output = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured_output
+        try:
+            tu.print_summary_statistics(stats)
+        finally:
+            sys.stdout = old_stdout
+        output = captured_output.getvalue()
+        
+        # Normalize whitespace
+        output_clean = re.sub(r"\s+", " ", output)
+        
+        self.assertIn("All Time 2 200 $ 2.00 100 $ 1.00", output_clean)
+        self.assertIn("Last 7 Days 2 200 $ 2.00 100 $ 1.00", output_clean)
+        self.assertIn("Last 30 Days 2 200 $ 2.00 100 $ 1.00", output_clean)
+
+    def test_main_entry_point(self):
+        # Verify main() exists and can be called with mocked args
+        import argparse
+        from unittest.mock import patch
+        
+        with patch("argparse.ArgumentParser.parse_args") as mock_args:
+            mock_args.return_value = argparse.Namespace(
+                model=False,
+                raw=True,
+                today=True,
+                yesterday=False,
+                this_week=False,
+                last_week=False,
+                this_month=False,
+                last_month=False,
+                date_range=None
+            )
+            with patch("token_usage.aggregate_usage") as mock_agg:
+                mock_agg.return_value = {}
+                captured_output = io.StringIO()
+                with patch("sys.stdout", captured_output):
+                    tu.main()
+                self.assertEqual(captured_output.getvalue().strip(), "0")
 
 
 if __name__ == "__main__":

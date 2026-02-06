@@ -32,6 +32,11 @@ def load_config():
 CONFIG = load_config()
 
 
+def reload_config():
+    global CONFIG
+    CONFIG = load_config()
+
+
 def calculate_cost(model, input_tokens, cached_tokens, output_tokens):
     """Calculates cost based on model type and tiered pricing."""
     model_lower = model.lower()
@@ -71,10 +76,20 @@ def calculate_cost(model, input_tokens, cached_tokens, output_tokens):
 def aggregate_usage(base_dir=None):
     if base_dir:
         tmp_dir = Path(base_dir)
+        cache_file = tmp_dir / "usage_cache.json"
     else:
         # Use real user home
         gemini_dir = Path.home() / ".gemini"
         tmp_dir = gemini_dir / "tmp"
+        cache_file = gemini_dir / "usage_cache.json"
+
+    cache = {}
+    if cache_file.exists():
+        try:
+            with cache_file.open("r", encoding="utf-8") as f:
+                cache = json.load(f)
+        except Exception:
+            pass
 
     # stats[date][model] = {
     #   sessions: set(), input: 0, cached: 0, output: 0, cost: 0.0
@@ -93,8 +108,30 @@ def aggregate_usage(base_dir=None):
     if not tmp_dir.exists():
         return stats
 
+    updated_cache = {}
+    new_data_found = False
+
     for session_file in tmp_dir.glob("**/session-*.json"):
         try:
+            mtime = session_file.stat().st_mtime
+            file_key = str(session_file)
+            
+            # Check cache
+            if file_key in cache and cache[file_key]["mtime"] == mtime:
+                file_stats = cache[file_key]["stats"]
+                updated_cache[file_key] = cache[file_key]
+                
+                for date, models in file_stats.items():
+                    for model, s in models.items():
+                        m_stats = stats[date][model]
+                        m_stats["sessions"].add(s["session_id"])
+                        m_stats["input"] += s["input"]
+                        m_stats["cached"] += s["cached"]
+                        m_stats["output"] += s["output"]
+                        m_stats["cost"] += s["cost"]
+                continue
+
+            new_data_found = True
             with session_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
 
@@ -103,9 +140,10 @@ def aggregate_usage(base_dir=None):
 
             session_id = data.get("sessionId") or session_file.stem
             start_time = data.get("startTime", "")
-
             date = start_time.split("T")[0] if "T" in start_time else "unknown"
 
+            file_record_stats = defaultdict(lambda: defaultdict(dict))
+            
             messages = data.get("messages", [])
             for msg in messages:
                 if msg.get("type") == "gemini":
@@ -113,25 +151,42 @@ def aggregate_usage(base_dir=None):
                     tokens = msg.get("tokens", {})
 
                     inp = tokens.get("input", 0)
-                    cache = tokens.get("cached", 0)
+                    cache_tokens = tokens.get("cached", 0)
                     out = tokens.get("output", 0) + tokens.get("thoughts", 0)
 
-                    # Calculate cost per message to handle tiered thresholds
-                    # correctly.
-                    cost = calculate_cost(model, inp, cache, out)
+                    cost = calculate_cost(model, inp, cache_tokens, out)
 
                     m_stats = stats[date][model]
                     m_stats["sessions"].add(session_id)
                     m_stats["input"] += inp
-                    m_stats["cached"] += cache
+                    m_stats["cached"] += cache_tokens
                     m_stats["output"] += out
                     m_stats["cost"] += cost
+                    
+                    # Store in cache record
+                    r_stats = file_record_stats[date][model]
+                    r_stats["session_id"] = session_id
+                    r_stats["input"] = r_stats.get("input", 0) + inp
+                    r_stats["cached"] = r_stats.get("cached", 0) + cache_tokens
+                    r_stats["output"] = r_stats.get("output", 0) + out
+                    r_stats["cost"] = r_stats.get("cost", 0) + cost
+
+            updated_cache[file_key] = {
+                "mtime": mtime,
+                "stats": file_record_stats
+            }
 
         except (json.JSONDecodeError, IOError, KeyError):
             continue
         except Exception:
-            # Catch-all for other unexpected issues but keep going
             continue
+
+    if new_data_found or len(updated_cache) != len(cache):
+        try:
+            with cache_file.open("w", encoding="utf-8") as f:
+                json.dump(updated_cache, f)
+        except Exception:
+            pass
 
     return stats
 
@@ -228,7 +283,7 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
         return
 
     # Header
-    model_header = f"{'MODEL':<25} " if show_models else ""
+    model_header = f"{'MODEL':<40} " if show_models else ""
     header = (
         f"{'DATE':<12} {model_header}{'SESS':<5} {'INPUT':>12} "
         f"{'CACHED':>12} {'OUTPUT':>12} {'TOTAL':>12} {'COST':>10}"
@@ -270,7 +325,7 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
                 total = s["input"] + s["cached"] + s["output"]
 
                 print(
-                    f"{display_date:<12} {model[:25]:<25} "
+                    f"{display_date:<12} {model[:40]:<40} "
                     f"{len(s['sessions']):<5} {s['input']:>12,} "
                     f"{s['cached']:>12,} {s['output']:>12,} "
                     f"{total:>12,} ${s['cost']:>8.2f}"
@@ -289,15 +344,16 @@ def print_report(stats, show_models=False, today_only=False, raw=False):
     if show_models and len(model_grand_totals) > 1:
         for model in sorted(model_grand_totals.keys()):
             m_stats = model_grand_totals[model]
-            label = f"TOTALS ({model[:33]})"
+            label = f"TOTALS ({model[:40]})"
+            offset = 59
             print(
-                f"{label:<44} {m_stats['tokens']:>50,} "
+                f"{label:<{offset}} {m_stats['tokens']:>50,} "
                 f"${m_stats['cost']:>8.2f}"
             )
         print("-" * line_len)
 
     total_label = "TOTALS (ALL)" if show_models else "TOTALS"
-    offset = 44 if show_models else 18
+    offset = 59 if show_models else 18
     print(
         f"{total_label:<{offset}} {grand_total_tokens:>50,} "
         f"${grand_total_cost:>8.2f}"
@@ -354,36 +410,37 @@ def print_summary_statistics(stats, show_models=False):
     # Last N days calculations
     def get_period_stats(days):
         cutoff = today - timedelta(days=days)
-        period_tokens = [
-            v for k, v in daily_token_totals.items() if k >= cutoff
-        ]
-        period_costs = [v for k, v in daily_cost_totals.items() if k >= cutoff]
-        return sum(period_tokens), sum(period_costs)
+        usage_days = [k for k in daily_token_totals.keys() if k >= cutoff]
+        period_tokens = [daily_token_totals[k] for k in usage_days]
+        period_costs = [daily_cost_totals[k] for k in usage_days]
+        return sum(period_tokens), sum(period_costs), len(usage_days)
 
-    last_7_tokens, last_7_cost = get_period_stats(7)
-    last_30_tokens, last_30_cost = get_period_stats(30)
+    last_7_tokens, last_7_cost, last_7_days = get_period_stats(7)
+    last_30_tokens, last_30_cost, last_30_days = get_period_stats(30)
 
-    print("\nSUMMARY STATISTICS")
+    print("\nSUMMARY STATISTICS (Averages per usage day)")
     print("-" * 30)
     
     gen_header = (
-        f"{'PERIOD':<15} {'TOKENS':>15} {'COST':>12} "
+        f"{'PERIOD':<15} {'DAYS':>5} {'TOKENS':>15} {'COST':>12} "
         f"{'AVG TOKENS/D':>15} {'AVG COST/D':>12}"
     )
     print(gen_header)
     print("-" * len(gen_header))
     
     print(
-        f"{'All Time':<15} {grand_total_tokens:>15,} ${grand_total_cost:>10.2f} "
+        f"{'All Time':<15} {total_days:>5} {grand_total_tokens:>15,} ${grand_total_cost:>10.2f} "
         f"{int(avg_tokens_per_day):>15,} ${avg_cost_per_day:>10.2f}"
     )
     print(
-        f"{'Last 7 Days':<15} {last_7_tokens:>15,} ${last_7_cost:>10.2f} "
-        f"{int(last_7_tokens / 7):>15,} ${last_7_cost / 7:>10.2f}"
+        f"{'Last 7 Days':<15} {last_7_days:>5} {last_7_tokens:>15,} ${last_7_cost:>10.2f} "
+        f"{int(last_7_tokens / last_7_days) if last_7_days > 0 else 0:>15,} "
+        f"${last_7_cost / last_7_days if last_7_days > 0 else 0:>10.2f}"
     )
     print(
-        f"{'Last 30 Days':<15} {last_30_tokens:>15,} ${last_30_cost:>10.2f} "
-        f"{int(last_30_tokens / 30):>15,} ${last_30_cost / 30:>10.2f}"
+        f"{'Last 30 Days':<15} {last_30_days:>5} {last_30_tokens:>15,} ${last_30_cost:>10.2f} "
+        f"{int(last_30_tokens / last_30_days) if last_30_days > 0 else 0:>15,} "
+        f"${last_30_cost / last_30_days if last_30_days > 0 else 0:>10.2f}"
     )
 
     if show_models and model_totals:
@@ -412,7 +469,7 @@ def print_summary_statistics(stats, show_models=False):
             )
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
         description="Calculate Gemini token usage and costs."
     )
@@ -493,3 +550,7 @@ if __name__ == "__main__":
         args.this_month, args.last_month, args.date_range
     ]):
         print_summary_statistics(stats, show_models=args.model)
+
+
+if __name__ == "__main__":
+    main()
